@@ -1,0 +1,127 @@
+#!/bin/bash
+
+
+# Set the argument value to VERSION variable
+VERSION="$1"
+
+
+# Check if the provided argument is a valid SemVer code
+if [[ -n "$VERSION" && "$VERSION" =~ ^[0-9]+.[0-9]+.[0-9]+$ ]]; then
+  echo "Error: Invalid version code. Version code should be a valid SemVer code, got $VERSION instead."
+  exit 1
+fi
+
+
+# Check if VERSION is empty
+if [ -z "$VERSION" ]; then
+    echo Fetching s2crefdb@latest...
+  # Fetch the deploy code from server.com/latest
+  deploy_code=$(curl -sS "http://159.65.18.150:8801/latest")
+  # Check if the response is a valid SemVer code
+  if [[ "$deploy_code" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    read -p "Version $deploy_code is available. Do you want to deploy it? (y/n): " choice
+    if [ "$choice" == "y" ]; then
+      # Update VERSION with the deploy code
+      VERSION="$deploy_code"
+    else
+      echo "Terminating deployment process..."
+      exit 1
+    fi
+  else
+    echo "Error: Invalid deploy code returned from server."
+    exit 1
+  fi
+fi
+
+
+# Use the VERSION variable for further processing
+echo "Deploying VERSION: $VERSION"
+# Run other commands or actions here
+# exit 0
+
+URL="https://referraldb.safe2choose.org"
+backup_dir=$(date +'%m-%d-%Y')
+
+mkdir logs
+mkdir logs/$VERSION
+echo !------------------! Deploying S2CREFDB V$VERSION... !------------------!
+echo !---! Downloading Version $VERSION... !---!
+response=$(curl -f -sS -w "%{http_code}" http://159.65.18.150:8801/v$VERSION.tar.gz -o v$VERSION.tar.gz)
+rc=$?
+if [ $rc -eq 0 ]; then
+    if [ "$response" -eq 200 ]; then
+        echo !---! Finished Downloading Version $VERSION !---!
+    else
+        echo "Download Failed. ERROR: $response"
+        exit 1
+    fi
+else
+    echo "Download Failed. Error: $response"
+    exit 1
+fi
+echo !---! Decompressing into versions/$VERSION... !---!
+mkdir versions/$VERSION
+tar -xf v$VERSION.tar.gz --directory versions/$VERSION > logs/$VERSION/tar.log
+rc=$?
+if [ $rc -eq 0 ]; then
+    echo !---! Finished Decompressing !---!
+else
+    echo "Decompression Failed, cleaning up and exiting..."
+    rm v$VERSION.tar.gz
+    exit 1
+fi
+echo !---! Cleaning Up... !---!
+rm v$VERSION.tar.gz
+echo !---! Running install script !---!
+if [ -f "versions/$VERSION/$VERSION.sh" ]; then
+        # Installation file found, install
+        echo "Found installation file, executing..."
+        source versions/$VERSION/$VERSION.sh
+        rm versions/$VERSION/$VERSION.sh
+    else
+        # Installation not needed
+        echo !---! No installation file found, skipping...  !---!
+    fi
+echo !------------------! Hot-Swaping codebase !------------------!
+echo !---! Creating folders !---!
+mkdir tar-backups > /dev/null 2>& 1
+mkdir backups > /dev/null 2>& 1
+mkdir staging > /dev/null 2>& 1
+mkdir staging/$VERSION > /dev/null 2>& 1
+mkdir backups/$VERSION > /dev/null 2>& 1
+mkdir tar-backups/$backup_dir > /dev/null 2>& 1
+echo !---! Creating tarball !---!
+tar --exclude-vcs -zcvf tar-backups/$backup_dir/v$VERSION.tar.gz /var/www/referraldb/ReferralDatabase > logs/$VERSION/tarball.log
+echo !------------------! swapping... !------------------!
+echo !---! Copying to staging... !---!
+cp -a versions/$VERSION/. staging/$VERSION/ > logs/$VERSION/cp.log
+echo !---! switching folders '(Downtime expected)'... !---!
+start=$(date +%s%3N)
+shopt -s dotglob
+mv /var/www/referraldb/ReferralDatabase backups/$VERSION
+mv staging/$VERSION /var/www/referraldb/ReferralDatabase
+end=$(date +%s%3N)
+downtime=$(($end-$start))
+echo Total downtime is $downtime ms.
+echo !---! Cleaning up... !---!
+rm -rf versions/$VERSION
+rm -rf staging/$VERSION
+echo !---! Running tests... !---!
+
+# Send a GET request to the URL and store the HTTP response code in a variable
+RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" $URL)
+
+# Check if the response code is not in the 4xx or 5xx range
+if [[ $RESPONSE_CODE =~ ^(4|5)[0-9]{2}$ ]]; then
+    echo "Error: The website returned a non-200 response code: $RESPONSE_CODE, rolling back..."
+    down_start=$start
+    source rollback.sh
+    downtime=$(($end - $down_start))
+    echo Total downtime from the deployment time is $downtime ms.
+    exit 1
+else
+    echo !---! Tests for version $VERSION completed successfully, web test return response code $RESPONSE_CODE !---!
+fi
+
+
+echo !------------------! Version $VERSION Deployment Successful with $downtime ms downtime! !------------------!
